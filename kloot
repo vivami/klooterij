@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# kloot: run Claude Code in an isolated container.
+#
+# Usage:
+#   kloot [DIR]            run claude with --dangerously-skip-permissions (default)
+#   kloot -s [DIR]         run claude with permission prompts on
+#   kloot --shell [DIR]    drop into a zsh shell in the container
+#
+# DIR defaults to $PWD. Mounts:
+#   <workspace>     -> /workspace
+#   ~/workspace     -> /home/node/workspace (if present)
+#   ~/Github        -> /home/node/Github (all code projects, if present)
+#   ~/.claude       -> /home/node/.claude
+#   ~/.claude.json  -> /home/node/.claude.json (if present)
+#   ~/.gitconfig    -> /home/node/.gitconfig (ro, if present)
+#   host SSH agent  -> /ssh-agent (1Password via OrbStack)
+#   named volume    -> /commandhistory (persistent shell history)
+
+set -euo pipefail
+
+mode="bypass"
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -s|--safe)    mode="safe";  shift ;;
+        --shell)      mode="shell"; shift ;;
+        -h|--help)    sed -n '2,/^set -/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -/d'; exit 0 ;;
+        --)           shift; break ;;
+        *)            echo "kloot: unknown flag: $1" >&2; exit 2 ;;
+    esac
+done
+
+workspace="${1:-$PWD}"
+[[ -d "$workspace" ]] || { echo "kloot: $workspace is not a directory" >&2; exit 1; }
+workspace="$(cd "$workspace" && pwd)"
+
+name="kloot-$(basename "$workspace" | tr -c 'a-zA-Z0-9_-' '_')-$$"
+
+# OrbStack / Docker Desktop expose host SSH agent (incl. 1Password) here.
+ssh_sock="/run/host-services/ssh-auth.sock"
+if [[ ! -S "$ssh_sock" ]]; then
+    ssh_sock="${SSH_AUTH_SOCK:-}"
+fi
+if [[ -z "$ssh_sock" || ! -S "$ssh_sock" ]]; then
+    echo "kloot: no SSH agent socket found; SSH forwarding disabled" >&2
+    ssh_args=()
+else
+    ssh_args=(-v "$ssh_sock:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent)
+fi
+
+mkdir -p "$HOME/.claude"
+claudejson_args=()
+[[ -f "$HOME/.claude.json" ]] && claudejson_args=(-v "$HOME/.claude.json:/home/node/.claude.json")
+
+gitconfig_args=()
+[[ -f "$HOME/.gitconfig" ]] && gitconfig_args=(-v "$HOME/.gitconfig:/home/node/.gitconfig:ro")
+
+github_args=()
+[[ -d "$HOME/Github" ]] && github_args=(-v "$HOME/Github:/home/node/Github")
+
+workspace_home_args=()
+[[ -d "$HOME/workspace" ]] && workspace_home_args=(-v "$HOME/workspace:/home/node/workspace")
+
+case "$mode" in
+    bypass) cmd=(claude --dangerously-skip-permissions) ;;
+    safe)   cmd=(claude) ;;
+    shell)  cmd=(/bin/zsh) ;;
+esac
+
+exec docker run --rm -it \
+    --name "$name" \
+    --hostname "$(basename "$workspace")" \
+    -v "$workspace:/workspace" \
+    -v "$HOME/.claude:/home/node/.claude" \
+    -v kloot-history:/commandhistory \
+    ${claudejson_args[@]+"${claudejson_args[@]}"} \
+    ${workspace_home_args[@]+"${workspace_home_args[@]}"} \
+    ${github_args[@]+"${github_args[@]}"} \
+    ${gitconfig_args[@]+"${gitconfig_args[@]}"} \
+    ${ssh_args[@]+"${ssh_args[@]}"} \
+    -e TERM="${TERM:-xterm-256color}" \
+    -w /workspace \
+    kloot:latest "${cmd[@]}"
