@@ -4,24 +4,29 @@
 # Usage:
 #   kloot [DIR]            run claude with --dangerously-skip-permissions (default)
 #   kloot -s [DIR]         run claude with permission prompts on
+#   kloot -A [DIR]         also forward the host SSH agent (1Password); off by default
 #   kloot --shell [DIR]    drop into a zsh shell in the container
 #
-# DIR defaults to $PWD. Mounts:
+# Flags can be combined, e.g. `kloot -s -A .`.
+#
+# DIR defaults to ~/workspace. Mounts:
 #   <workspace>     -> /workspace
 #   ~/workspace     -> /home/node/workspace (if present)
 #   ~/Github        -> /home/node/Github (all code projects, if present)
 #   ~/.claude       -> /home/node/.claude
 #   ~/.claude.json  -> /home/node/.claude.json (if present)
 #   ~/.gitconfig    -> /home/node/.gitconfig (ro, if present)
-#   host SSH agent  -> /ssh-agent (1Password via OrbStack)
+#   host SSH agent  -> /ssh-agent (only with -A/--ssh; 1Password / SSH keys)
 #   named volume    -> /commandhistory (persistent shell history)
 
 set -euo pipefail
 
 mode="bypass"
+ssh_forward=0
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
         -s|--safe)    mode="safe";  shift ;;
+        -A|--ssh)     ssh_forward=1; shift ;;
         --shell)      mode="shell"; shift ;;
         -h|--help)    sed -n '2,/^set -/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -/d'; exit 0 ;;
         --)           shift; break ;;
@@ -29,22 +34,29 @@ while [[ "${1:-}" == -* ]]; do
     esac
 done
 
-workspace="${1:-$PWD}"
+# Default workspace is ~/workspace on the host (mounted at /workspace, the
+# container's working dir). Pass an explicit DIR (or `kloot .`) for another project.
+default_workspace="$HOME/workspace"
+mkdir -p "$default_workspace"
+workspace="${1:-$default_workspace}"
 [[ -d "$workspace" ]] || { echo "kloot: $workspace is not a directory" >&2; exit 1; }
 workspace="$(cd "$workspace" && pwd)"
 
 name="kloot-$(basename "$workspace" | tr -c 'a-zA-Z0-9_-' '_')-$$"
 
-# OrbStack / Docker Desktop expose host SSH agent (incl. 1Password) here.
-ssh_sock="/run/host-services/ssh-auth.sock"
-if [[ ! -S "$ssh_sock" ]]; then
-    ssh_sock="${SSH_AUTH_SOCK:-}"
-fi
-if [[ -z "$ssh_sock" || ! -S "$ssh_sock" ]]; then
-    echo "kloot: no SSH agent socket found; SSH forwarding disabled" >&2
-    ssh_args=()
-else
-    ssh_args=(-v "$ssh_sock:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent)
+# SSH agent / 1Password forwarding is opt-in (-A/--ssh); off by default.
+ssh_args=()
+if [[ "$ssh_forward" == 1 ]]; then
+    # Docker Desktop / OrbStack expose the host SSH agent here on macOS.
+    ssh_sock="/run/host-services/ssh-auth.sock"
+    if [[ ! -S "$ssh_sock" ]]; then
+        ssh_sock="${SSH_AUTH_SOCK:-}"
+    fi
+    if [[ -z "$ssh_sock" || ! -S "$ssh_sock" ]]; then
+        echo "kloot: no SSH agent socket found; SSH forwarding disabled" >&2
+    else
+        ssh_args=(-v "$ssh_sock:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent)
+    fi
 fi
 
 mkdir -p "$HOME/.claude"
