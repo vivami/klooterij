@@ -41,7 +41,13 @@ ENV SHELL=/bin/zsh
 ENV EDITOR=nano
 ENV VISUAL=nano
 
-ARG ZSH_IN_DOCKER_VERSION=1.2.0
+# Force HTTP/1.1 for git and disable interactive prompts. This avoids the
+# transient "expected flush after ref listing" / "could not read Username"
+# failure when the oh-my-zsh installer clones over GitHub's HTTP/2 endpoint.
+ENV GIT_TERMINAL_PROMPT=0
+RUN git config --global http.version HTTP/1.1
+
+ARG ZSH_IN_DOCKER_VERSION=1.2.1
 RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
     -p git \
     -p fzf \
