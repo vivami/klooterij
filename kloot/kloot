@@ -2,8 +2,9 @@
 # kloot: run Claude Code in an isolated container.
 #
 # Usage:
-#   kloot [DIR]            run claude with --dangerously-skip-permissions (default)
-#   kloot -s [DIR]         run claude with permission prompts on
+#   kloot [DIR]            run claude with --permission-mode auto (default)
+#   kloot -s [DIR]         run claude with --permission-mode manual (prompt on every action)
+#   kloot -y [DIR]         run claude with --dangerously-skip-permissions (YOLO)
 #   kloot -A [DIR]         also forward the host SSH agent (1Password); off by default
 #   kloot --shell [DIR]    drop into a zsh shell in the container
 #
@@ -21,11 +22,12 @@
 
 set -euo pipefail
 
-mode="bypass"
+mode="auto"
 ssh_forward=0
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
         -s|--safe)    mode="safe";  shift ;;
+        -y|--yolo)    mode="bypass"; shift ;;
         -A|--ssh)     ssh_forward=1; shift ;;
         --shell)      mode="shell"; shift ;;
         -h|--help)    sed -n '2,/^set -/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -/d'; exit 0 ;;
@@ -73,12 +75,17 @@ workspace_home_args=()
 [[ -d "$HOME/workspace" ]] && workspace_home_args=(-v "$HOME/workspace:/home/node/workspace")
 
 case "$mode" in
+    auto)   cmd=(claude --permission-mode auto) ;;
+    safe)   cmd=(claude --permission-mode manual) ;;
     bypass) cmd=(claude --dangerously-skip-permissions) ;;
-    safe)   cmd=(claude) ;;
     shell)  cmd=(/bin/zsh) ;;
 esac
 
+# The agent's own sandbox (bubblewrap) needs to create user namespaces, which
+# Docker's default seccomp profile blocks. Without this the sandboxed commands
+# fail with "bwrap: No permissions to create new namespace".
 exec docker run --rm -it \
+    --security-opt seccomp=unconfined \
     --name "$name" \
     --hostname "$(basename "$workspace")" \
     -v "$workspace:/workspace" \

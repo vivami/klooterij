@@ -2,8 +2,10 @@
 # koodex: run OpenAI Codex CLI in an isolated container.
 #
 # Usage:
-#   koodex [DIR]            run codex with --dangerously-bypass-approvals-and-sandbox (default)
-#   koodex -s [DIR]         run codex with approval prompts on
+#   koodex [DIR]            run codex in Auto mode: workspace-write sandbox, approval
+#                           on request (default)
+#   koodex -s [DIR]         run codex read-only, approval on request
+#   koodex -y [DIR]         run codex with --dangerously-bypass-approvals-and-sandbox (YOLO)
 #   koodex -A [DIR]         also forward the host SSH agent (1Password); off by default
 #   koodex --shell [DIR]    drop into a zsh shell in the container
 #
@@ -18,15 +20,19 @@
 #   host SSH agent  -> /ssh-agent (only with -A/--ssh; 1Password / SSH keys)
 #   named volume    -> /commandhistory (persistent shell history)
 #
+# MCP servers listed in host_only_mcp (default: node_repl) are disabled for the
+# run, because their binaries live on the macOS host only.
+#
 # OPENAI_API_KEY is forwarded into the container if it is set in your environment.
 
 set -euo pipefail
 
-mode="bypass"
+mode="auto"
 ssh_forward=0
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
         -s|--safe)    mode="safe";  shift ;;
+        -y|--yolo)    mode="bypass"; shift ;;
         -A|--ssh)     ssh_forward=1; shift ;;
         --shell)      mode="shell"; shift ;;
         -h|--help)    sed -n '2,/^set -/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -/d'; exit 0 ;;
@@ -75,13 +81,29 @@ github_args=()
 workspace_home_args=()
 [[ -d "$HOME/workspace" ]] && workspace_home_args=(-v "$HOME/workspace:/home/node/workspace")
 
+# MCP servers that live only on the macOS host cannot start in the container.
+# `node_repl` ships inside the ChatGPT desktop app (a Mach-O binary under
+# /Applications), so Codex reports "MCP startup failed: No such file or
+# directory". Disable them per run; ~/.codex/config.toml stays untouched.
+# Add more names here if other host-only servers appear.
+host_only_mcp=(node_repl)
+mcp_args=()
+for server in "${host_only_mcp[@]}"; do
+    mcp_args+=(-c "mcp_servers.${server}.enabled=false")
+done
+
 case "$mode" in
-    bypass) cmd=(codex --dangerously-bypass-approvals-and-sandbox) ;;
-    safe)   cmd=(codex) ;;
+    auto)   cmd=(codex ${mcp_args[@]+"${mcp_args[@]}"} --sandbox workspace-write --ask-for-approval on-request) ;;
+    safe)   cmd=(codex ${mcp_args[@]+"${mcp_args[@]}"} --sandbox read-only --ask-for-approval on-request) ;;
+    bypass) cmd=(codex ${mcp_args[@]+"${mcp_args[@]}"} --dangerously-bypass-approvals-and-sandbox) ;;
     shell)  cmd=(/bin/zsh) ;;
 esac
 
+# The agent's own sandbox (bubblewrap) needs to create user namespaces, which
+# Docker's default seccomp profile blocks. Without this the sandboxed commands
+# fail with "bwrap: No permissions to create new namespace".
 exec docker run --rm -it \
+    --security-opt seccomp=unconfined \
     --name "$name" \
     --hostname "$(basename "$workspace")" \
     -v "$workspace:/workspace" \
