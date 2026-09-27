@@ -15,6 +15,7 @@
 #   <workspace>     -> /workspace
 #   ~/workspace     -> /home/node/workspace (if present)
 #   ~/Github        -> /home/node/Github (all code projects, if present)
+#   CleanShot media -> same absolute host path (ro, if present; supports drag/drop)
 #   ~/.codex        -> /home/node/.codex (Codex config + credentials)
 #   ~/.gitconfig    -> /home/node/.gitconfig (ro, if present)
 #   host SSH agent  -> /ssh-agent (only with -A/--ssh; 1Password / SSH keys)
@@ -53,16 +54,39 @@ name="koodex-$(basename "$workspace" | tr -c 'a-zA-Z0-9_-' '_')-$$"
 
 # SSH agent / 1Password forwarding is opt-in (-A/--ssh); off by default.
 ssh_args=()
+orbstack_args=()
 if [[ "$ssh_forward" == 1 ]]; then
-    # Docker Desktop / OrbStack expose the host SSH agent here on macOS.
-    ssh_sock="/run/host-services/ssh-auth.sock"
-    if [[ ! -S "$ssh_sock" ]]; then
-        ssh_sock="${SSH_AUTH_SOCK:-}"
-    fi
-    if [[ -z "$ssh_sock" || ! -S "$ssh_sock" ]]; then
-        echo "koodex: no SSH agent socket found; SSH forwarding disabled" >&2
-    else
-        ssh_args=(-v "$ssh_sock:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent)
+    host_os="$(uname -s)"
+    case "$host_os" in
+        Darwin)
+            # This path is provided inside the Docker Desktop / OrbStack VM. It
+            # normally does not exist in the macOS host filesystem, so do not
+            # test it with -S here.
+            ssh_sock="/run/host-services/ssh-auth.sock"
+            ;;
+        Linux)
+            ssh_sock="${SSH_AUTH_SOCK:-}"
+            if [[ -z "$ssh_sock" || ! -S "$ssh_sock" ]]; then
+                echo "koodex: -A/--ssh requested, but SSH_AUTH_SOCK is unset or not a socket on Linux; start or unlock an SSH agent (for example 1Password) and retry" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "koodex: -A/--ssh is supported only on macOS and Linux (detected $host_os)" >&2
+            exit 1
+            ;;
+    esac
+
+    ssh_args=(
+        --mount "type=bind,source=$ssh_sock,target=/ssh-agent"
+        --env SSH_AUTH_SOCK=/ssh-agent
+    )
+
+    # This is host-key data only. Never mount ~/.ssh or OrbStack's private key.
+    if [[ -f "$HOME/.orbstack/ssh/known_hosts" ]]; then
+        orbstack_args=(
+            --mount "type=bind,source=$HOME/.orbstack/ssh/known_hosts,target=/home/node/.orbstack/ssh/known_hosts,readonly"
+        )
     fi
 fi
 
@@ -80,6 +104,17 @@ github_args=()
 
 workspace_home_args=()
 [[ -d "$HOME/workspace" ]] && workspace_home_args=(-v "$HOME/workspace:/home/node/workspace")
+
+# Ghostty inserts the host path when a CleanShot capture is dragged into the
+# terminal. Mirror that narrowly scoped directory at the identical path so the
+# agent can resolve it without exposing the rest of the host home directory.
+cleanshot_media="$HOME/Library/Application Support/CleanShot/media"
+cleanshot_args=()
+if [[ -d "$cleanshot_media" ]]; then
+    cleanshot_args=(
+        --mount "type=bind,source=$cleanshot_media,target=$cleanshot_media,readonly"
+    )
+fi
 
 # MCP servers that live only on the macOS host cannot start in the container.
 # `node_repl` ships inside the ChatGPT desktop app (a Mach-O binary under
@@ -99,6 +134,27 @@ case "$mode" in
     shell)  cmd=(/bin/zsh) ;;
 esac
 
+if [[ "$ssh_forward" == 1 ]]; then
+    # Verify the forwarded agent from inside the container before the harness
+    # (or requested shell) starts. ssh-add exits 1 for an empty agent and 2 when
+    # the socket cannot be reached.
+    ssh_preflight='ssh-add -l >/dev/null 2>&1
+ssh_add_status=$?
+case "$ssh_add_status" in
+    0) ;;
+    1)
+        echo "$0: -A/--ssh requested, but the forwarded SSH agent exposes no identities; unlock 1Password, enable its SSH agent, and ensure at least one key is eligible" >&2
+        exit 1
+        ;;
+    *)
+        echo "$0: -A/--ssh requested, but the forwarded SSH agent is unreachable at /ssh-agent; check that 1Password SSH agent integration and socket forwarding are enabled" >&2
+        exit 1
+        ;;
+esac
+exec "$@"'
+    cmd=(/bin/sh -c "$ssh_preflight" koodex "${cmd[@]}")
+fi
+
 # The agent's own sandbox (bubblewrap) needs to create user namespaces, which
 # Docker's default seccomp profile blocks. Without this the sandboxed commands
 # fail with "bwrap: No permissions to create new namespace".
@@ -112,8 +168,10 @@ exec docker run --rm -it \
     ${codex_env[@]+"${codex_env[@]}"} \
     ${workspace_home_args[@]+"${workspace_home_args[@]}"} \
     ${github_args[@]+"${github_args[@]}"} \
+    ${cleanshot_args[@]+"${cleanshot_args[@]}"} \
     ${gitconfig_args[@]+"${gitconfig_args[@]}"} \
     ${ssh_args[@]+"${ssh_args[@]}"} \
+    ${orbstack_args[@]+"${orbstack_args[@]}"} \
     -e TERM="${TERM:-xterm-256color}" \
     -w /workspace \
     koodex:latest "${cmd[@]}"

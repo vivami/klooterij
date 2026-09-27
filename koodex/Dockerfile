@@ -22,7 +22,9 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhisto
 
 ENV DEVCONTAINER=true
 
-RUN mkdir -p /workspace /home/node/.codex && chown -R node:node /workspace /home/node/.codex
+RUN mkdir -p /workspace /home/node/.codex /home/node/.orbstack/ssh \
+    && chown -R node:node /workspace /home/node/.codex /home/node/.orbstack
+COPY ssh_config_orbstack /etc/ssh/ssh_config.d/20-orbstack.conf
 WORKDIR /workspace
 
 ARG GIT_DELTA_VERSION=0.18.2

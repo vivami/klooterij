@@ -45,7 +45,7 @@ passwordless `sudo`.
 
 ## Prerequisites
 
-- macOS with a Docker-compatible runtime installed and running — e.g. [OrbStack](https://orbstack.dev) or [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/). It provides the `docker` CLI and forwards the host SSH agent.
+- A Docker-compatible runtime installed and running. On macOS, use e.g. [OrbStack](https://orbstack.dev) or [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/); native Linux Docker is also supported.
 - The `docker` CLI on your `PATH` (your runtime installs this for you).
 
 ## Build
@@ -193,8 +193,10 @@ Common to every harness:
 | `<workspace>`       | `/workspace`              | The target dir (defaults to `~/workspace`).|
 | `~/workspace`       | `/home/node/workspace`    | Your workspace, if the dir exists.      |
 | `~/Github`          | `/home/node/Github`       | All projects, if the dir exists.        |
+| `~/Library/Application Support/CleanShot/media` | Same absolute host path | Read-only, if present; enables CleanShot drag-and-drop paths. |
 | `~/.gitconfig`      | `/home/node/.gitconfig`   | Read-only, if present.                  |
 | host SSH agent      | `/ssh-agent`              | Only with `-A`/`--ssh` (1Password / SSH keys).|
+| `~/.orbstack/ssh/known_hosts` | `/home/node/.orbstack/ssh/known_hosts` | Read-only, only with `-A` and if present. |
 | `<agent>-history`   | `/commandhistory`         | Named volume — persistent shell history.|
 
 Harness-specific config/credentials:
@@ -208,6 +210,15 @@ Harness-specific config/credentials:
 `koodex` also forwards `OPENAI_API_KEY` into the container if it is set in your
 environment (an alternative to `codex login` writing to `~/.codex`).
 
+### CleanShot drag and drop
+
+On macOS, dragging a CleanShot capture into Ghostty inserts its absolute host
+path, typically under
+`~/Library/Application Support/CleanShot/media`. When that directory exists,
+both wrappers mount it read-only at the same absolute path inside the container,
+so Claude Code or Codex can open the pasted path. The rest of the host home
+directory remains unavailable unless covered by another documented mount.
+
 The container is started with `--rm`, so it's torn down on exit; persistent
 state lives entirely in the mounts above.
 
@@ -216,7 +227,63 @@ state lives entirely in the mounts above.
 SSH-agent / 1Password forwarding is **off by default** — enable it per-run with
 `-A` (or `--ssh`). When enabled, the wrappers forward the host SSH agent into the
 container so `git` over SSH and 1Password's SSH agent work without copying keys.
-On macOS, Docker Desktop and OrbStack both expose it at
-`/run/host-services/ssh-auth.sock`; the wrappers use that, falling back to
-`$SSH_AUTH_SOCK` otherwise. If `-A` is given but no agent socket is found,
-forwarding is skipped with a warning and everything else still works.
+On macOS, Docker Desktop and OrbStack expose the agent inside their Linux VM at
+`/run/host-services/ssh-auth.sock`; that path normally does not exist in the
+macOS filesystem, so the wrappers deliberately pass it through without a host
+socket check. On native Linux, the wrappers require `$SSH_AUTH_SOCK` to name an
+existing Unix socket.
+
+An `-A` run executes `ssh-add -l` inside the container before starting the agent
+or `--shell`. The run fails immediately with a diagnostic if the forwarded
+socket is unreachable or the agent exposes no identities. This catches a
+stopped/disabled 1Password agent, an ineligible key set, and runtime socket
+forwarding failures before the AI harness starts. Runs without `-A` receive no
+SSH-agent mount and no `SSH_AUTH_SOCK` environment variable.
+
+Forwarding does not move a private key into the container: 1Password retains the
+private key and handles signing requests over the socket. However, every process
+running as `node` in an `-A` container can ask the agent to sign, so enable it
+only for workspaces you trust. The wrappers never mount `~/.ssh`, a 1Password
+key file, or OrbStack's generated private key.
+
+#### SSH to OrbStack machines
+
+Both images include a Linux-native `Host orb` configuration. It connects to
+OrbStack's built-in SSH service at `host.docker.internal:32222`, uses
+`HostKeyAlias 127.0.0.1`, and reads host keys from the read-only
+`~/.orbstack/ssh/known_hosts` mount when that file exists on the Mac. It does not
+copy OrbStack's generated macOS config: that file contains a macOS-only
+`ProxyCommand` and forces OrbStack's generated private key, neither of which is
+appropriate inside the container. The image config also deliberately leaves
+`IdentitiesOnly` unset so OpenSSH can offer keys from the forwarded 1Password
+agent.
+
+Use the same multiplexed usernames that OrbStack documents:
+
+```bash
+kloot -A --shell             # or: koodex -A --shell
+ssh orb                      # default OrbStack machine
+ssh machine@orb              # named machine, default user
+ssh user@machine@orb         # named machine and user
+ssh user@192.0.2.10          # ordinary SSH target
+```
+
+Before the first 1Password-backed connection, authorize the **public** half of
+the chosen 1Password SSH Key item. Copy its complete public-key line from
+1Password, substitute it below, and run this once on the Mac:
+
+```bash
+orb_public_key='ssh-ed25519 AAAAC3... selected-key-comment'
+install -d -m 700 "$HOME/.orbstack/ssh"
+touch "$HOME/.orbstack/ssh/authorized_keys"
+chmod 600 "$HOME/.orbstack/ssh/authorized_keys"
+grep -qxF -- "$orb_public_key" "$HOME/.orbstack/ssh/authorized_keys" || \
+  printf '%s\n' "$orb_public_key" >> "$HOME/.orbstack/ssh/authorized_keys"
+```
+
+Quit and reopen OrbStack after updating the file so its built-in SSH server
+reloads it. This adds one authorized public key; it neither replaces OrbStack's
+generated key nor changes the 1Password item. On the first authentication,
+1Password should show its normal local authorization prompt. Removing that line
+from `authorized_keys` and restarting OrbStack should make these agent-backed
+connections fail again.
