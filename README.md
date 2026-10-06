@@ -28,6 +28,7 @@ Docker Desktop on macOS.
 |----------|----------------------------------------------------|------------|-----------------|
 | `kloot`  | [Claude Code](https://claude.com/claude-code)      | `kloot/`   | `kloot:latest`  |
 | `koodex` | [OpenAI Codex CLI](https://github.com/openai/codex)| `koodex/`  | `koodex:latest` |
+| `mister-all` | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `mister-all/` | `mister-all:latest` |
 
 Each folder is **self-contained**: its own `Dockerfile`, wrapper script, and
 `update_*.sh` rebuild script. Adding a new harness = copy a folder, swap the CLI
@@ -36,12 +37,13 @@ package, launch command, permission flags, and config-dir mount.
 - `kloot` — */klʊət/*, as in strong Antwerp's Flemish _"kloten met Claude"_
   (roughly: messing about with Claude).
 - `koodex` — same spirit
+- `mister-all` — "Mistral", as an Antwerp tongue says it.
 
 Every image bundles: `git`, `gh`, `git-delta`, `ripgrep`, `fzf`, `jq`, `zsh`
 (with oh-my-zsh), `python3`/`pip`, `build-essential`, plus that harness's agent
-CLI. Both images also carry `bubblewrap` (plus `socat` in `kloot`) for the
-agent's own Linux sandbox in auto mode. The container user is `node` with
-passwordless `sudo`.
+CLI. The `kloot` and `koodex` images also carry `bubblewrap` (plus `socat` in
+`kloot`) for the agent's own Linux sandbox in auto mode. The `mister-all` image
+installs Vibe with `uv`. The container user is `node` with passwordless `sudo`.
 
 ## Prerequisites
 
@@ -56,13 +58,16 @@ exactly as shown in the table above.
 ```bash
 cd ~/Github/klooterij/kloot  && docker build -t kloot:latest  .
 cd ~/Github/klooterij/koodex && docker build -t koodex:latest .
+cd ~/Github/klooterij/mister-all && docker build -t mister-all:latest .
 ```
 
 Optional build args (per harness):
 
 - `TZ` — set the container timezone, e.g. `--build-arg TZ="Europe/Copenhagen"`.
-- `CLAUDE_CODE_VERSION` (kloot) / `CODEX_VERSION` (koodex) — pin an agent version
-  (default `latest`).
+- `CLAUDE_CODE_VERSION` (kloot) / `CODEX_VERSION` (koodex) / `VIBE_VERSION`
+  (mister-all) — pin an agent version (default `latest`).
+- `UV_VERSION` (mister-all) — pin the `ghcr.io/astral-sh/uv` image tag (default
+  `latest`).
 
 ```bash
 cd ~/Github/klooterij/koodex
@@ -75,7 +80,8 @@ On Apple Silicon the images build natively for `arm64` (git-delta auto-detects
 the architecture), so no `--platform` flag is needed.
 
 To rebuild against the latest agent release and prune the old image, run the
-folder's update script, e.g. `./koodex/update_koodex.sh` or `./kloot/update_kloot.sh`.
+folder's update script, e.g. `./koodex/update_koodex.sh`, `./kloot/update_kloot.sh`
+or `./mister-all/update_mister-all.sh`.
 
 ## Put the commands on your `PATH`
 
@@ -85,20 +91,22 @@ in the repo (so `git pull` updates them) while making the commands global:
 ```bash
 sudo ln -s ~/Github/klooterij/kloot/kloot   /usr/local/bin/kloot
 sudo ln -s ~/Github/klooterij/koodex/koodex /usr/local/bin/koodex
+sudo ln -s ~/Github/klooterij/mister-all/mister-all /usr/local/bin/mister-all
 ```
 
-Either command now works from any directory:
+Each command now works from any directory:
 
 ```bash
 cd ~/Github/my-project
 kloot                       # start Claude Code in this project
 koodex                      # start Codex CLI in this project
+mister-all                  # start Mistral Vibe in this project
 ```
 
 ## Usage
 
-The two wrappers share the same interface (`AGENT` = `Claude` for kloot,
-`Codex` for koodex):
+The three wrappers share the same interface (`AGENT` = `Claude` for kloot,
+`Codex` for koodex, `Vibe` for mister-all):
 
 ```bash
 kloot  [DIR]           # auto mode (default): sandboxed autonomy, risky actions still asked
@@ -109,6 +117,7 @@ kloot  --shell [DIR]   # drop into a zsh shell in the container
 kloot  -h              # help
 
 koodex [DIR]           # same flags
+mister-all [DIR]       # same flags
 ```
 
 Flags can be combined, e.g. `kloot -s -A .`. `DIR` defaults to `~/workspace` and
@@ -117,11 +126,11 @@ path) to target another project.
 
 ### Permission modes
 
-| Mode          | Flag         | kloot (Claude Code)                | koodex (Codex)                                             |
-|---------------|--------------|------------------------------------|------------------------------------------------------------|
-| Auto (default)| *(none)*     | `--permission-mode auto`           | `--sandbox workspace-write --ask-for-approval on-request`   |
-| Safe          | `-s`         | `--permission-mode manual`         | `--sandbox read-only --ask-for-approval on-request`         |
-| YOLO          | `-y`         | `--dangerously-skip-permissions`   | `--dangerously-bypass-approvals-and-sandbox`                |
+| Mode          | Flag         | kloot (Claude Code)                | koodex (Codex)                                             | mister-all (Vibe)          |
+|---------------|--------------|------------------------------------|------------------------------------------------------------|----------------------------|
+| Auto (default)| *(none)*     | `--permission-mode auto`           | `--sandbox workspace-write --ask-for-approval on-request`   | `--agent smart-approve`    |
+| Safe          | `-s`         | `--permission-mode manual`         | `--sandbox read-only --ask-for-approval on-request`         | `--agent ask`              |
+| YOLO          | `-y`         | `--dangerously-skip-permissions`   | `--dangerously-bypass-approvals-and-sandbox`                | `--agent auto-approve`     |
 
 **Auto** is the default and the recommended mode. The agent works on its own
 inside the workspace — it reads files, edits them, and runs commands — but it
@@ -137,17 +146,23 @@ does not get a blanket skip of every check:
   writes outside the workspace or uses the network. The image ships
   `bubblewrap`; without it Codex warns on every start and falls back to its
   bundled copy.
+- **mister-all:** Vibe's `smart-approve` agent sends each tool call to a model
+  classifier. It runs the safe calls and asks for the risky calls. Vibe has no
+  Linux sandbox, so the container is the only boundary.
 
-Both sandboxes build on user namespaces, which Docker's default seccomp profile
-blocks — `bwrap` then fails with *"No permissions to create new namespace"* and
-every sandboxed command dies. The wrappers therefore pass
-`--security-opt seccomp=unconfined`. It drops Docker's syscall filter, so the
-container leans on the kernel and on `--rm` isolation alone; the agent still runs
-as an unprivileged user with no extra capabilities. Drop that flag from the
-wrapper if you prefer the filter and can live without the agent's own sandbox.
+The Claude Code and Codex sandboxes build on user namespaces, which Docker's
+default seccomp profile blocks — `bwrap` then fails with *"No permissions to
+create new namespace"* and every sandboxed command dies. The `kloot` and
+`koodex` wrappers therefore pass `--security-opt seccomp=unconfined`. It drops
+Docker's syscall filter, so the container leans on the kernel and on `--rm`
+isolation alone; the agent still runs as an unprivileged user with no extra
+capabilities. Drop that flag from the wrapper if you prefer the filter and can
+live without the agent's own sandbox. `mister-all` does not pass the flag, so
+it keeps the filter.
 
 **Safe** (`-s`) turns the prompts back on for everything: Claude Code asks
-before each action, Codex is limited to reading the workspace.
+before each action, Codex is limited to reading the workspace, and Vibe asks
+before each tool call.
 
 **YOLO** (`-y`) skips every approval and, for Codex, the internal sandbox too.
 It is the old default. The container is what makes it tolerable: the agent runs
@@ -184,6 +199,22 @@ the server is skipped in the container and your `~/.codex/config.toml` keeps it
 for normal macOS use. Add further names to `host_only_mcp` in `koodex/koodex` if
 other host-only servers turn up.
 
+### Vibe in mister-all
+
+**Model.** The wrapper sets the default model through Vibe's `VIBE_*`
+environment variables, so `~/.vibe/config.toml` stays untouched. To start on
+another model, set `VIBE_ACTIVE_MODEL` on the host. You can also switch models
+in the session.
+
+**API key.** On macOS, Vibe keeps the key in the Keychain, and the container
+cannot read the Keychain. Export `MISTRAL_API_KEY` on the host, or let Vibe ask
+on the first container run. Vibe then saves the key to `~/.vibe/.env`.
+
+**Folder trust.** Vibe records trusted folders by path. Every project mounts at
+`/workspace`, so when you trust `/workspace` once, Vibe trusts every project
+that you open later. Do not trust `/workspace` persistently if you open
+repositories that you do not control.
+
 ## What gets mounted
 
 Common to every harness:
@@ -206,17 +237,19 @@ Harness-specific config/credentials:
 | `kloot`  | `~/.claude`      | `/home/node/.claude`      | Claude config & credentials.                 |
 | `kloot`  | `~/.claude.json` | `/home/node/.claude.json` | If present.                                  |
 | `koodex` | `~/.codex`       | `/home/node/.codex`       | Codex `config.toml` + `auth.json`.           |
+| `mister-all` | `~/.vibe`    | `/home/node/.vibe`        | Vibe `config.toml`, sessions, `.env` API key.|
 
 `koodex` also forwards `OPENAI_API_KEY` into the container if it is set in your
 environment (an alternative to `codex login` writing to `~/.codex`).
+`mister-all` does the same with `MISTRAL_API_KEY`.
 
 ### CleanShot drag and drop
 
 On macOS, dragging a CleanShot capture into Ghostty inserts its absolute host
 path, typically under
 `~/Library/Application Support/CleanShot/media`. When that directory exists,
-both wrappers mount it read-only at the same absolute path inside the container,
-so Claude Code or Codex can open the pasted path. The rest of the host home
+all wrappers mount it read-only at the same absolute path inside the container,
+so Claude Code, Codex or Vibe can open the pasted path. The rest of the host home
 directory remains unavailable unless covered by another documented mount.
 
 The container is started with `--rm`, so it's torn down on exit; persistent
@@ -248,7 +281,7 @@ key file, or OrbStack's generated private key.
 
 #### SSH to OrbStack machines
 
-Both images include a Linux-native `Host orb` configuration. It connects to
+All images include a Linux-native `Host orb` configuration. It connects to
 OrbStack's built-in SSH service at `host.docker.internal:32222`, uses
 `HostKeyAlias 127.0.0.1`, and reads host keys from the read-only
 `~/.orbstack/ssh/known_hosts` mount when that file exists on the Mac. It does not
@@ -261,7 +294,7 @@ agent.
 Use the same multiplexed usernames that OrbStack documents:
 
 ```bash
-kloot -A --shell             # or: koodex -A --shell
+kloot -A --shell             # or: koodex / mister-all -A --shell
 ssh orb                      # default OrbStack machine
 ssh machine@orb              # named machine, default user
 ssh user@machine@orb         # named machine and user

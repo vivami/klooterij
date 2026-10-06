@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# mister-all: run Mistral Vibe (on Mistral Large 4) in an isolated container.
+#
+# Usage:
+#   mister-all [DIR]          run vibe with --agent smart-approve: a classifier
+#                             runs safe tool calls, asks for risky ones (default)
+#   mister-all -s [DIR]       run vibe with --agent ask (approval for every tool call)
+#   mister-all -y [DIR]       run vibe with --agent auto-approve (YOLO)
+#   mister-all -A [DIR]       also forward the host SSH agent (1Password); off by default
+#   mister-all --shell [DIR]  drop into a zsh shell in the container
+#
+# Flags can be combined, e.g. `mister-all -s -A .`.
+#
+# DIR defaults to ~/workspace. Mounts:
+#   <workspace>     -> /workspace
+#   ~/workspace     -> /home/node/workspace (if present)
+#   ~/Github        -> /home/node/Github (all code projects, if present)
+#   CleanShot media -> same absolute host path (ro, if present; supports drag/drop)
+#   ~/.vibe         -> /home/node/.vibe (Vibe config, sessions, .env API key)
+#   ~/.gitconfig    -> /home/node/.gitconfig (ro, if present)
+#   host SSH agent  -> /ssh-agent (only with -A/--ssh; 1Password / SSH keys)
+#   named volume    -> /commandhistory (persistent shell history)
+#
+# The run defines the model alias `large-4` (mistral-large-4, reasoning on) and
+# makes it the active model. Set VIBE_ACTIVE_MODEL to start on another alias.
+#
+# MISTRAL_API_KEY is forwarded into the container if it is set in your environment.
+
+set -euo pipefail
+
+mode="auto"
+ssh_forward=0
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -s|--safe)    mode="safe";  shift ;;
+        -y|--yolo)    mode="bypass"; shift ;;
+        -A|--ssh)     ssh_forward=1; shift ;;
+        --shell)      mode="shell"; shift ;;
+        -h|--help)    sed -n '2,/^set -/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -/d'; exit 0 ;;
+        --)           shift; break ;;
+        *)            echo "mister-all: unknown flag: $1" >&2; exit 2 ;;
+    esac
+done
+
+# Default workspace is ~/workspace on the host (mounted at /workspace, the
+# container's working dir). Pass an explicit DIR (or `mister-all .`) for another project.
+default_workspace="$HOME/workspace"
+mkdir -p "$default_workspace"
+workspace="${1:-$default_workspace}"
+[[ -d "$workspace" ]] || { echo "mister-all: $workspace is not a directory" >&2; exit 1; }
+workspace="$(cd "$workspace" && pwd)"
+
+name="mister-all-$(basename "$workspace" | tr -c 'a-zA-Z0-9_-' '_')-$$"
+
+# SSH agent / 1Password forwarding is opt-in (-A/--ssh); off by default.
+ssh_args=()
+orbstack_args=()
+if [[ "$ssh_forward" == 1 ]]; then
+    host_os="$(uname -s)"
+    case "$host_os" in
+        Darwin)
+            # This path is provided inside the Docker Desktop / OrbStack VM. It
+            # normally does not exist in the macOS host filesystem, so do not
+            # test it with -S here.
+            ssh_sock="/run/host-services/ssh-auth.sock"
+            ;;
+        Linux)
+            ssh_sock="${SSH_AUTH_SOCK:-}"
+            if [[ -z "$ssh_sock" || ! -S "$ssh_sock" ]]; then
+                echo "mister-all: -A/--ssh requested, but SSH_AUTH_SOCK is unset or not a socket on Linux; start or unlock an SSH agent (for example 1Password) and retry" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "mister-all: -A/--ssh is supported only on macOS and Linux (detected $host_os)" >&2
+            exit 1
+            ;;
+    esac
+
+    ssh_args=(
+        --mount "type=bind,source=$ssh_sock,target=/ssh-agent"
+        --env SSH_AUTH_SOCK=/ssh-agent
+    )
+
+    # This is host-key data only. Never mount ~/.ssh or OrbStack's private key.
+    if [[ -f "$HOME/.orbstack/ssh/known_hosts" ]]; then
+        orbstack_args=(
+            --mount "type=bind,source=$HOME/.orbstack/ssh/known_hosts,target=/home/node/.orbstack/ssh/known_hosts,readonly"
+        )
+    fi
+fi
+
+mkdir -p "$HOME/.vibe"
+
+# Forward MISTRAL_API_KEY if set (alternative to the key in ~/.vibe/.env). On
+# macOS `vibe --setup` keeps the key in the Keychain, which the container cannot
+# read; without this variable Vibe asks once and saves it to ~/.vibe/.env.
+vibe_env=()
+[[ -n "${MISTRAL_API_KEY:-}" ]] && vibe_env=(-e MISTRAL_API_KEY)
+
+# The container has no browser. Vibe's browser sign-in treats a failed
+# webbrowser.open() as fatal and never polls for completion, so the flow hangs
+# after you sign in on the host. BROWSER=true makes the open succeed as a no-op;
+# Vibe still shows the sign-in URL, which you open on the host.
+vibe_env+=(-e BROWSER=true)
+
+# Vibe 2.26 has no built-in alias for Mistral Large 4 yet. Define it per run via
+# Vibe's VIBE_* environment layer, which deep-merges into `models` by alias, so
+# ~/.vibe/config.toml stays untouched. Prices are the preview rates (USD per
+# million tokens) and only feed Vibe's cost display; the API caps context at
+# 524288 tokens. thinking = "high" sends reasoning_effort = "high"; Large 4
+# accepts only "none" or "high".
+large4_model='{"large-4":{"name":"mistral-large-4","provider":"mistral","alias":"large-4","display_name":"Mistral Large 4","temperature":1.0,"thinking":"high","thinking_levels":["off","high"],"supports_images":true,"max_context_length":524288,"input_price":0.68,"output_price":2.09,"cached_input_price":0.07}}'
+vibe_env+=(
+    -e "VIBE_MODELS=$large4_model"
+    -e "VIBE_ACTIVE_MODEL=${VIBE_ACTIVE_MODEL:-large-4}"
+)
+
+gitconfig_args=()
+[[ -f "$HOME/.gitconfig" ]] && gitconfig_args=(-v "$HOME/.gitconfig:/home/node/.gitconfig:ro")
+
+github_args=()
+[[ -d "$HOME/Github" ]] && github_args=(-v "$HOME/Github:/home/node/Github")
+
+workspace_home_args=()
+[[ -d "$HOME/workspace" ]] && workspace_home_args=(-v "$HOME/workspace:/home/node/workspace")
+
+# Ghostty inserts the host path when a CleanShot capture is dragged into the
+# terminal. Mirror that narrowly scoped directory at the identical path so the
+# agent can resolve it without exposing the rest of the host home directory.
+cleanshot_media="$HOME/Library/Application Support/CleanShot/media"
+cleanshot_args=()
+if [[ -d "$cleanshot_media" ]]; then
+    cleanshot_args=(
+        --mount "type=bind,source=$cleanshot_media,target=$cleanshot_media,readonly"
+    )
+fi
+
+case "$mode" in
+    auto)   cmd=(vibe --agent smart-approve) ;;
+    safe)   cmd=(vibe --agent ask) ;;
+    bypass) cmd=(vibe --agent auto-approve) ;;
+    shell)  cmd=(/bin/zsh) ;;
+esac
+
+if [[ "$ssh_forward" == 1 ]]; then
+    # Verify the forwarded agent from inside the container before the harness
+    # (or requested shell) starts. ssh-add exits 1 for an empty agent and 2 when
+    # the socket cannot be reached.
+    ssh_preflight='ssh-add -l >/dev/null 2>&1
+ssh_add_status=$?
+case "$ssh_add_status" in
+    0) ;;
+    1)
+        echo "$0: -A/--ssh requested, but the forwarded SSH agent exposes no identities; unlock 1Password, enable its SSH agent, and ensure at least one key is eligible" >&2
+        exit 1
+        ;;
+    *)
+        echo "$0: -A/--ssh requested, but the forwarded SSH agent is unreachable at /ssh-agent; check that 1Password SSH agent integration and socket forwarding are enabled" >&2
+        exit 1
+        ;;
+esac
+exec "$@"'
+    cmd=(/bin/sh -c "$ssh_preflight" mister-all "${cmd[@]}")
+fi
+
+# Vibe has no Linux sandbox of its own (no bubblewrap), so unlike kloot and
+# koodex this run keeps Docker's default seccomp profile.
+exec docker run --rm -it \
+    --name "$name" \
+    --hostname "$(basename "$workspace")" \
+    -v "$workspace:/workspace" \
+    -v "$HOME/.vibe:/home/node/.vibe" \
+    -v mister-all-history:/commandhistory \
+    ${vibe_env[@]+"${vibe_env[@]}"} \
+    ${workspace_home_args[@]+"${workspace_home_args[@]}"} \
+    ${github_args[@]+"${github_args[@]}"} \
+    ${cleanshot_args[@]+"${cleanshot_args[@]}"} \
+    ${gitconfig_args[@]+"${gitconfig_args[@]}"} \
+    ${ssh_args[@]+"${ssh_args[@]}"} \
+    ${orbstack_args[@]+"${orbstack_args[@]}"} \
+    -e TERM="${TERM:-xterm-256color}" \
+    -w /workspace \
+    mister-all:latest "${cmd[@]}"
