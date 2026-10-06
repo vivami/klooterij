@@ -1,7 +1,7 @@
 ARG UV_VERSION=latest
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-FROM node:20
+FROM node:24-trixie
 
 ARG TZ
 ENV TZ="$TZ"
@@ -70,9 +70,10 @@ RUN for attempt in 1 2 3 4 5; do \
     echo "zsh-in-docker: failed after 5 attempts" >&2; \
     exit 1
 
-# Mistral Vibe needs Python >= 3.12; node:20 (Debian bookworm) ships 3.11.
-# Without --python 3.12, uv picks the system 3.11, skips the prebuilt wheel and
-# tries to build Vibe from source, which fails without a Rust toolchain.
+# Mistral Vibe needs Python >= 3.12. Pin --python 3.12 so uv uses its
+# standalone 3.12 instead of the system Python: on a base whose system Python
+# is older, uv would skip the prebuilt wheel and try to build Vibe from
+# source, which fails without a Rust toolchain.
 RUN if [ "$VIBE_VERSION" = latest ]; then spec=mistral-vibe; \
     else spec="mistral-vibe==${VIBE_VERSION}"; fi \
     && uv tool install --python 3.12 "$spec" \

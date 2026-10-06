@@ -15,7 +15,7 @@ container with that agent already running against your code. On exit the
 container is torn down; only your mounted files persist. Nothing else on your
 host is ever reachable.
 
-Every harness follows the same recipe: a `node:20` dev container with common CLI
+Every harness follows the same recipe: a `node:24-trixie` dev container with common CLI
 tooling, your project mounted at `/workspace`, your credentials mounted in, and
 the agent launched in its auto mode.
 

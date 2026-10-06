@@ -1,4 +1,4 @@
-FROM node:20
+FROM node:24-trixie
 
 ARG TZ
 ENV TZ="$TZ"
