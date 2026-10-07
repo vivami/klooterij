@@ -106,11 +106,10 @@ vibe_env+=(-e BROWSER=true)
 
 # Vibe 2.26 has no built-in alias for Mistral Large 4 yet. Define it per run via
 # Vibe's VIBE_* environment layer, which deep-merges into `models` by alias, so
-# ~/.vibe/config.toml stays untouched. Prices are the preview rates (USD per
-# million tokens) and only feed Vibe's cost display; the API caps context at
-# 524288 tokens. thinking = "high" sends reasoning_effort = "high"; Large 4
-# accepts only "none" or "high".
-large4_model='{"large-4":{"name":"mistral-large-4","provider":"mistral","alias":"large-4","display_name":"Mistral Large 4","temperature":1.0,"thinking":"high","thinking_levels":["off","high"],"supports_images":true,"max_context_length":524288,"input_price":0.68,"output_price":2.09,"cached_input_price":0.07}}'
+# ~/.vibe/config.toml stays untouched. The API caps context at 524288 tokens.
+# thinking = "high" sends reasoning_effort = "high"; Large 4 accepts only
+# "none" or "high".
+large4_model='{"large-4":{"name":"mistral-large-4","provider":"mistral","alias":"large-4","display_name":"Mistral Large 4","temperature":1.0,"thinking":"high","thinking_levels":["off","high"],"supports_images":true,"max_context_length":524288}}'
 vibe_env+=(
     -e "VIBE_MODELS=$large4_model"
     -e "VIBE_ACTIVE_MODEL=${VIBE_ACTIVE_MODEL:-large-4}"
