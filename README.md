@@ -29,6 +29,7 @@ Docker Desktop on macOS.
 | `kloot`  | [Claude Code](https://claude.com/claude-code)      | `kloot/`   | `kloot:latest`  |
 | `koodex` | [OpenAI Codex CLI](https://github.com/openai/codex)| `koodex/`  | `koodex:latest` |
 | `mister-all` | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `mister-all/` | `mister-all:latest` |
+| `pie`    | [pi](https://pi.dev)                               | `pie/`     | `pie:latest`    |
 
 Each folder is **self-contained**: its own `Dockerfile`, wrapper script, and
 `update_*.sh` rebuild script. Adding a new harness = copy a folder, swap the CLI
@@ -38,12 +39,14 @@ package, launch command, permission flags, and config-dir mount.
   (roughly: messing about with Claude).
 - `koodex` — same spirit
 - `mister-all` — "Mistral", as an Antwerp tongue says it.
+- `pie` — pi, baked into a container crust.
 
 Every image bundles: `git`, `gh`, `git-delta`, `ripgrep`, `fzf`, `jq`, `zsh`
 (with oh-my-zsh), `python3`/`pip`, `build-essential`, plus that harness's agent
 CLI. The `kloot` and `koodex` images also carry `bubblewrap` (plus `socat` in
 `kloot`) for the agent's own Linux sandbox in auto mode. The `mister-all` image
-installs Vibe with `uv`. The container user is `node` with passwordless `sudo`.
+installs Vibe with `uv`. The `pie` image adds `fd` (Debian's `fdfind`) for pi's
+`find` tool. The container user is `node` with passwordless `sudo`.
 
 ## Prerequisites
 
@@ -59,13 +62,14 @@ exactly as shown in the table above.
 cd ~/Github/klooterij/kloot  && docker build -t kloot:latest  .
 cd ~/Github/klooterij/koodex && docker build -t koodex:latest .
 cd ~/Github/klooterij/mister-all && docker build -t mister-all:latest .
+cd ~/Github/klooterij/pie    && docker build -t pie:latest    .
 ```
 
 Optional build args (per harness):
 
 - `TZ` — set the container timezone, e.g. `--build-arg TZ="Europe/Copenhagen"`.
 - `CLAUDE_CODE_VERSION` (kloot) / `CODEX_VERSION` (koodex) / `VIBE_VERSION`
-  (mister-all) — pin an agent version (default `latest`).
+  (mister-all) / `PI_VERSION` (pie) — pin an agent version (default `latest`).
 - `UV_VERSION` (mister-all) — pin the `ghcr.io/astral-sh/uv` image tag (default
   `latest`).
 
@@ -80,8 +84,8 @@ On Apple Silicon the images build natively for `arm64` (git-delta auto-detects
 the architecture), so no `--platform` flag is needed.
 
 To rebuild against the latest agent release and prune the old image, run the
-folder's update script, e.g. `./koodex/update_koodex.sh`, `./kloot/update_kloot.sh`
-or `./mister-all/update_mister-all.sh`.
+folder's update script, e.g. `./koodex/update_koodex.sh`, `./kloot/update_kloot.sh`,
+`./mister-all/update_mister-all.sh` or `./pie/update_pie.sh`.
 
 ## Put the commands on your `PATH`
 
@@ -92,6 +96,7 @@ in the repo (so `git pull` updates them) while making the commands global:
 sudo ln -s ~/Github/klooterij/kloot/kloot   /usr/local/bin/kloot
 sudo ln -s ~/Github/klooterij/koodex/koodex /usr/local/bin/koodex
 sudo ln -s ~/Github/klooterij/mister-all/mister-all /usr/local/bin/mister-all
+sudo ln -s ~/Github/klooterij/pie/pie       /usr/local/bin/pie
 ```
 
 Each command now works from any directory:
@@ -101,12 +106,12 @@ cd ~/Github/my-project
 kloot                       # start Claude Code in this project
 koodex                      # start Codex CLI in this project
 mister-all                  # start Mistral Vibe in this project
+pie                         # start pi in this project
 ```
 
 ## Usage
 
-The three wrappers share the same interface (`AGENT` = `Claude` for kloot,
-`Codex` for koodex, `Vibe` for mister-all):
+The wrappers share the same interface (`pie` has no `-s`/`-y`; see below):
 
 ```bash
 kloot  [DIR]           # auto mode (default): sandboxed autonomy, risky actions still asked
@@ -118,6 +123,7 @@ kloot  -h              # help
 
 koodex [DIR]           # same flags
 mister-all [DIR]       # same flags
+pie [DIR]              # same flags except -s / -y
 ```
 
 Flags can be combined, e.g. `kloot -s -A .`. `DIR` defaults to `~/workspace` and
@@ -131,6 +137,10 @@ path) to target another project.
 | Auto (default)| *(none)*     | `--permission-mode auto`           | `--sandbox workspace-write --ask-for-approval on-request`   | `--agent smart-approve`    |
 | Safe          | `-s`         | `--permission-mode manual`         | `--sandbox read-only --ask-for-approval on-request`         | `--agent ask`              |
 | YOLO          | `-y`         | `--dangerously-skip-permissions`   | `--dangerously-bypass-approvals-and-sandbox`                | `--agent auto-approve`     |
+
+`pie` has no modes: it runs `pi` as it comes. pi has no approval prompts or
+sandbox, so it behaves like YOLO mode and the container is the only boundary.
+`pie` therefore has no `-s` or `-y` flag.
 
 **Auto** is the default and the recommended mode. The agent works on its own
 inside the workspace — it reads files, edits them, and runs commands — but it
@@ -157,8 +167,8 @@ create new namespace"* and every sandboxed command dies. The `kloot` and
 Docker's syscall filter, so the container leans on the kernel and on `--rm`
 isolation alone; the agent still runs as an unprivileged user with no extra
 capabilities. Drop that flag from the wrapper if you prefer the filter and can
-live without the agent's own sandbox. `mister-all` does not pass the flag, so
-it keeps the filter.
+live without the agent's own sandbox. `mister-all` and `pie` do not pass the
+flag, so they keep the filter.
 
 **Safe** (`-s`) turns the prompts back on for everything: Claude Code asks
 before each action, Codex is limited to reading the workspace, and Vibe asks
@@ -215,6 +225,33 @@ on the first container run. Vibe then saves the key to `~/.vibe/.env`.
 that you open later. Do not trust `/workspace` persistently if you open
 repositories that you do not control.
 
+### pi in pie
+
+**Login and API keys.** pi stores logins and API keys in
+`~/.pi/agent/auth.json`, which the `~/.pi` mount shares with the host. Log in
+on the host, or run `/login` in the container. The container has no browser:
+open the sign-in URL on the host. If the callback cannot reach the container,
+paste the final redirect URL or code back into pi. `pi auth login <provider>
+--no-browser` uses a device code where the provider supports one. The wrapper
+also forwards the provider keys listed in `pi_api_keys` (for example
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`,
+`OPENROUTER_API_KEY`) when they are set on the host.
+
+**Host binaries.** pi downloads `fd` and `rg` into `~/.pi/agent/bin` and
+prefers them over the system copies. On a Mac those are macOS binaries that
+cannot run in the Linux container. The wrapper mounts an empty tmpfs over that
+directory, so pi uses the image's `fdfind` and `rg`, and the host copies stay
+untouched.
+
+**Version check.** The image sets `PI_SKIP_VERSION_CHECK=1`. `pi update`
+cannot persist in a `--rm` container; run `./pie/update_pie.sh` instead.
+
+**Project trust and sessions.** pi records project trust and groups sessions by
+path. Every project mounts at `/workspace`, so trusting `/workspace` trusts
+every project that you open later, and `pi -c` / `pi -r` see the sessions of
+all projects. Do not trust `/workspace` persistently if you open repositories
+that you do not control.
+
 ## What gets mounted
 
 Common to every harness:
@@ -238,10 +275,13 @@ Harness-specific config/credentials:
 | `kloot`  | `~/.claude.json` | `/home/node/.claude.json` | If present.                                  |
 | `koodex` | `~/.codex`       | `/home/node/.codex`       | Codex `config.toml` + `auth.json`.           |
 | `mister-all` | `~/.vibe`    | `/home/node/.vibe`        | Vibe `config.toml`, sessions, `.env` API key.|
+| `pie`    | `~/.pi`          | `/home/node/.pi`          | pi `settings.json`, `auth.json`, sessions.   |
+| `pie`    | tmpfs            | `/home/node/.pi/agent/bin`| Hides host-native `fd`/`rg` downloads.       |
 
 `koodex` also forwards `OPENAI_API_KEY` into the container if it is set in your
 environment (an alternative to `codex login` writing to `~/.codex`).
-`mister-all` does the same with `MISTRAL_API_KEY`.
+`mister-all` does the same with `MISTRAL_API_KEY`, and `pie` with the provider
+keys in `pi_api_keys`.
 
 ### CleanShot drag and drop
 
@@ -249,7 +289,7 @@ On macOS, dragging a CleanShot capture into Ghostty inserts its absolute host
 path, typically under
 `~/Library/Application Support/CleanShot/media`. When that directory exists,
 all wrappers mount it read-only at the same absolute path inside the container,
-so Claude Code, Codex or Vibe can open the pasted path. The rest of the host home
+so Claude Code, Codex, Vibe or pi can open the pasted path. The rest of the host home
 directory remains unavailable unless covered by another documented mount.
 
 The container is started with `--rm`, so it's torn down on exit; persistent
@@ -294,7 +334,7 @@ agent.
 Use the same multiplexed usernames that OrbStack documents:
 
 ```bash
-kloot -A --shell             # or: koodex / mister-all -A --shell
+kloot -A --shell             # or: koodex / mister-all / pie -A --shell
 ssh orb                      # default OrbStack machine
 ssh machine@orb              # named machine, default user
 ssh user@machine@orb         # named machine and user

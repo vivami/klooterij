@@ -57,5 +57,6 @@ test_wrapper() {
 test_wrapper kloot "$repo_root/kloot/kloot"
 test_wrapper koodex "$repo_root/koodex/koodex"
 test_wrapper mister-all "$repo_root/mister-all/mister-all"
+test_wrapper pie "$repo_root/pie/pie"
 
 echo "all CleanShot mount regressions passed"

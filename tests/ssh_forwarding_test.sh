@@ -143,8 +143,9 @@ start_test_agent
 test_wrapper kloot "$repo_root/kloot/kloot"
 test_wrapper koodex "$repo_root/koodex/koodex"
 test_wrapper mister-all "$repo_root/mister-all/mister-all"
+test_wrapper pie "$repo_root/pie/pie"
 
-for config in "$repo_root/kloot/ssh_config_orbstack" "$repo_root/koodex/ssh_config_orbstack" "$repo_root/mister-all/ssh_config_orbstack"; do
+for config in "$repo_root/kloot/ssh_config_orbstack" "$repo_root/koodex/ssh_config_orbstack" "$repo_root/mister-all/ssh_config_orbstack" "$repo_root/pie/ssh_config_orbstack"; do
     grep -Eq '^[[:space:]]*Host[[:space:]]+orb$' "$config" || fail "$config lacks Host orb"
     grep -Eq '^[[:space:]]*HostName[[:space:]]+host\.docker\.internal$' "$config" || fail "$config has the wrong OrbStack host"
     grep -Eq '^[[:space:]]*Port[[:space:]]+32222$' "$config" || fail "$config has the wrong OrbStack port"
@@ -154,7 +155,7 @@ for config in "$repo_root/kloot/ssh_config_orbstack" "$repo_root/koodex/ssh_conf
         fail "$config overrides agent authentication or strict host-key checking"
 done
 
-for image in koodex mister-all; do
+for image in koodex mister-all pie; do
     cmp -s "$repo_root/kloot/ssh_config_orbstack" "$repo_root/$image/ssh_config_orbstack" || \
         fail "kloot and $image have different OrbStack SSH configurations"
 done

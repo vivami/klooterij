@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# pie: run pi (https://pi.dev) in an isolated container.
+#
+# Usage:
+#   pie [DIR]            run pi as it comes (pi has no approval prompts)
+#   pie -A [DIR]         also forward the host SSH agent (1Password); off by default
+#   pie --shell [DIR]    drop into a zsh shell in the container
+#
+# Flags can be combined, e.g. `pie -A --shell .`.
+#
+# DIR defaults to ~/workspace. Mounts:
+#   <workspace>     -> /workspace
+#   ~/workspace     -> /home/node/workspace (if present)
+#   ~/Github        -> /home/node/Github (all code projects, if present)
+#   CleanShot media -> same absolute host path (ro, if present; supports drag/drop)
+#   ~/.pi           -> /home/node/.pi (pi settings, auth.json, sessions)
+#   tmpfs           -> /home/node/.pi/agent/bin (hides host-native fd/rg binaries)
+#   ~/.gitconfig    -> /home/node/.gitconfig (ro, if present)
+#   host SSH agent  -> /ssh-agent (only with -A/--ssh; 1Password / SSH keys)
+#   named volume    -> /commandhistory (persistent shell history)
+#
+# Provider API keys listed in pi_api_keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...)
+# are forwarded into the container if they are set in your environment.
+
+set -euo pipefail
+
+mode="pi"
+ssh_forward=0
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -A|--ssh)     ssh_forward=1; shift ;;
+        --shell)      mode="shell"; shift ;;
+        -h|--help)    sed -n '2,/^set -/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -/d'; exit 0 ;;
+        --)           shift; break ;;
+        *)            echo "pie: unknown flag: $1" >&2; exit 2 ;;
+    esac
+done
+
+# Default workspace is ~/workspace on the host (mounted at /workspace, the
+# container's working dir). Pass an explicit DIR (or `pie .`) for another project.
+default_workspace="$HOME/workspace"
+mkdir -p "$default_workspace"
+workspace="${1:-$default_workspace}"
+[[ -d "$workspace" ]] || { echo "pie: $workspace is not a directory" >&2; exit 1; }
+workspace="$(cd "$workspace" && pwd)"
+
+name="pie-$(basename "$workspace" | tr -c 'a-zA-Z0-9_-' '_')-$$"
+
+# SSH agent / 1Password forwarding is opt-in (-A/--ssh); off by default.
+ssh_args=()
+orbstack_args=()
+if [[ "$ssh_forward" == 1 ]]; then
+    host_os="$(uname -s)"
+    case "$host_os" in
+        Darwin)
+            # This path is provided inside the Docker Desktop / OrbStack VM. It
+            # normally does not exist in the macOS host filesystem, so do not
+            # test it with -S here.
+            ssh_sock="/run/host-services/ssh-auth.sock"
+            ;;
+        Linux)
+            ssh_sock="${SSH_AUTH_SOCK:-}"
+            if [[ -z "$ssh_sock" || ! -S "$ssh_sock" ]]; then
+                echo "pie: -A/--ssh requested, but SSH_AUTH_SOCK is unset or not a socket on Linux; start or unlock an SSH agent (for example 1Password) and retry" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "pie: -A/--ssh is supported only on macOS and Linux (detected $host_os)" >&2
+            exit 1
+            ;;
+    esac
+
+    ssh_args=(
+        --mount "type=bind,source=$ssh_sock,target=/ssh-agent"
+        --env SSH_AUTH_SOCK=/ssh-agent
+    )
+
+    # This is host-key data only. Never mount ~/.ssh or OrbStack's private key.
+    if [[ -f "$HOME/.orbstack/ssh/known_hosts" ]]; then
+        orbstack_args=(
+            --mount "type=bind,source=$HOME/.orbstack/ssh/known_hosts,target=/home/node/.orbstack/ssh/known_hosts,readonly"
+        )
+    fi
+fi
+
+# pi keeps fd and ripgrep downloads in ~/.pi/agent/bin and prefers them over
+# the system copies. On macOS those are Mach-O binaries, so the wrapper hides
+# that directory behind a tmpfs and pi uses the image's Linux fd and rg. Create
+# it on the host first so Docker does not create the mount point as root.
+mkdir -p "$HOME/.pi/agent/bin"
+
+# Forward provider API keys if set (alternative to `/login` in ~/.pi/agent/auth.json).
+# Add more names here for other providers pi supports.
+pi_api_keys=(
+    ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY
+    MISTRAL_API_KEY OPENROUTER_API_KEY GROQ_API_KEY XAI_API_KEY DEEPSEEK_API_KEY
+    COPILOT_GITHUB_TOKEN
+)
+pi_env=()
+for key in "${pi_api_keys[@]}"; do
+    if [[ -n "${!key:-}" ]]; then pi_env+=(-e "$key"); fi
+done
+
+gitconfig_args=()
+[[ -f "$HOME/.gitconfig" ]] && gitconfig_args=(-v "$HOME/.gitconfig:/home/node/.gitconfig:ro")
+
+github_args=()
+[[ -d "$HOME/Github" ]] && github_args=(-v "$HOME/Github:/home/node/Github")
+
+workspace_home_args=()
+[[ -d "$HOME/workspace" ]] && workspace_home_args=(-v "$HOME/workspace:/home/node/workspace")
+
+# Ghostty inserts the host path when a CleanShot capture is dragged into the
+# terminal. Mirror that narrowly scoped directory at the identical path so the
+# agent can resolve it without exposing the rest of the host home directory.
+cleanshot_media="$HOME/Library/Application Support/CleanShot/media"
+cleanshot_args=()
+if [[ -d "$cleanshot_media" ]]; then
+    cleanshot_args=(
+        --mount "type=bind,source=$cleanshot_media,target=$cleanshot_media,readonly"
+    )
+fi
+
+case "$mode" in
+    pi)     cmd=(pi) ;;
+    shell)  cmd=(/bin/zsh) ;;
+esac
+
+if [[ "$ssh_forward" == 1 ]]; then
+    # Verify the forwarded agent from inside the container before the harness
+    # (or requested shell) starts. ssh-add exits 1 for an empty agent and 2 when
+    # the socket cannot be reached.
+    ssh_preflight='ssh-add -l >/dev/null 2>&1
+ssh_add_status=$?
+case "$ssh_add_status" in
+    0) ;;
+    1)
+        echo "$0: -A/--ssh requested, but the forwarded SSH agent exposes no identities; unlock 1Password, enable its SSH agent, and ensure at least one key is eligible" >&2
+        exit 1
+        ;;
+    *)
+        echo "$0: -A/--ssh requested, but the forwarded SSH agent is unreachable at /ssh-agent; check that 1Password SSH agent integration and socket forwarding are enabled" >&2
+        exit 1
+        ;;
+esac
+exec "$@"'
+    cmd=(/bin/sh -c "$ssh_preflight" pie "${cmd[@]}")
+fi
+
+# pi has no Linux sandbox of its own (no bubblewrap), so unlike kloot and
+# koodex this run keeps Docker's default seccomp profile.
+exec docker run --rm -it \
+    --name "$name" \
+    --hostname "$(basename "$workspace")" \
+    -v "$workspace:/workspace" \
+    -v "$HOME/.pi:/home/node/.pi" \
+    --mount type=tmpfs,destination=/home/node/.pi/agent/bin,tmpfs-mode=1777 \
+    -v pie-history:/commandhistory \
+    ${pi_env[@]+"${pi_env[@]}"} \
+    ${workspace_home_args[@]+"${workspace_home_args[@]}"} \
+    ${github_args[@]+"${github_args[@]}"} \
+    ${cleanshot_args[@]+"${cleanshot_args[@]}"} \
+    ${gitconfig_args[@]+"${gitconfig_args[@]}"} \
+    ${ssh_args[@]+"${ssh_args[@]}"} \
+    ${orbstack_args[@]+"${orbstack_args[@]}"} \
+    -e TERM="${TERM:-xterm-256color}" \
+    -w /workspace \
+    pie:latest "${cmd[@]}"

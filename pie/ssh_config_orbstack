@@ -1,0 +1,9 @@
+# OrbStack's macOS-generated config uses a macOS-only ProxyCommand and its own
+# private key. Containers connect to the same built-in SSH service directly and
+# authenticate through the explicitly forwarded SSH agent instead.
+Host orb
+    HostName host.docker.internal
+    Port 32222
+    User default
+    UserKnownHostsFile ~/.orbstack/ssh/known_hosts
+    HostKeyAlias 127.0.0.1
